@@ -1,0 +1,83 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+    function me() { return request.auth.uid; }
+    function isMember(gid) {
+      return signedIn() && me() in get(/databases/$(database)/documents/groups/$(gid)).data.members;
+    }
+
+    // Perfil de cada persona: solo lo ve y lo cambia ella misma
+    match /users/{userId} {
+      allow read: if signedIn() && me() == userId;
+      allow create, update: if signedIn() && me() == userId
+        && request.resource.data.username is string
+        && request.resource.data.username.size() <= 20;
+    }
+
+    // Códigos de invitación: se pueden consultar uno a uno, nunca listar
+    match /codes/{code} {
+      allow get: if signedIn();
+      allow list: if false;
+      allow create: if signedIn() && request.resource.data.creator == me();
+    }
+
+    match /groups/{gid} {
+      function changed() { return request.resource.data.diff(resource.data).affectedKeys(); }
+      function infoChanged() { return request.resource.data.memberInfo.diff(resource.data.memberInfo).affectedKeys(); }
+      // Entrar con código: solo puedes añadirte a ti
+      function isJoin() {
+        return !(me() in resource.data.members)
+          && changed().hasOnly(['members', 'memberInfo'])
+          && request.resource.data.members.toSet() == resource.data.members.toSet().union([me()].toSet())
+          && infoChanged().hasOnly([me()]);
+      }
+      // Cambios de un miembro: su propia foto, salir, ajustes (según permisos) y preparar rondas
+      function isMemberUpdate() {
+        return me() in resource.data.members
+          && !changed().hasAny(['creator', 'code', 'createdAt'])
+          && (!changed().hasAny(['members'])
+              || request.resource.data.members.toSet() == resource.data.members.toSet().difference([me()].toSet()))
+          && (!changed().hasAny(['memberInfo']) || infoChanged().hasOnly([me()]))
+          && (!changed().hasAny(['settings', 'roundBase', 'anchor'])
+              || resource.data.settings.editors == 'todos' || me() == resource.data.creator)
+          && (request.resource.data.settings.editors == resource.data.settings.editors
+              || me() == resource.data.creator);
+      }
+
+      allow read: if signedIn() && me() in resource.data.members;
+      allow create: if signedIn()
+        && request.resource.data.creator == me()
+        && request.resource.data.members == [me()]
+        && request.resource.data.memberInfo.keys().hasOnly([me()]);
+      allow update: if signedIn() && (isJoin() || isMemberUpdate());
+
+      match /rounds/{n} {
+        allow read, create: if isMember(gid);
+      }
+      match /votes/{vid} {
+        allow read: if isMember(gid);
+        allow create, update: if isMember(gid)
+          && request.resource.data.uid == me()
+          && vid == string(request.resource.data.round) + '_' + me();
+      }
+      match /chat/{mid} {
+        allow read: if isMember(gid);
+        allow create: if isMember(gid)
+          && (request.resource.data.by == me()
+              || (request.resource.data.by == null && mid.matches('sys-[0-9]+')));
+        allow update: if isMember(gid) && resource.data.by == null && request.resource.data.by == null;
+        allow delete: if signedIn() && resource.data.by == me();
+      }
+      match /queue/{qid} {
+        allow read: if isMember(gid);
+        allow create: if isMember(gid)
+          && request.resource.data.by == me()
+          && request.resource.data.consumed == false
+          && request.resource.data.text.size() <= 160;
+        allow update: if isMember(gid) && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['consumed']);
+        allow delete: if signedIn() && resource.data.by == me() && resource.data.consumed == false;
+      }
+    }
+  }
+}
