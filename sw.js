@@ -1,6 +1,6 @@
 /* Guarda la app para que abra rápido y funcione aunque la conexión sea mala.
    Sube el número de versión cada vez que cambies archivos. */
-const CACHE = "senalados-v2";
+const CACHE = "senalados-v3";
 const ASSETS = ["./", "index.html", "styles.css", "app.js", "logic.js", "questions.js", "manifest.webmanifest", "icon-180.png", "icon-192.png", "icon-512.png"];
 
 self.addEventListener("install", e => {

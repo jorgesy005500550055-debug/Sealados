@@ -17,12 +17,15 @@ service cloud.firestore {
 
     // Códigos de invitación: se pueden consultar uno a uno, nunca listar
     match /codes/{code} {
+      function adminOf(gid) { return get(/databases/$(database)/documents/groups/$(gid)).data.creator == me(); }
       allow get: if signedIn();
       allow list: if false;
-      allow create: if signedIn() && request.resource.data.creator == me();
-      // el creador puede guardar el nombre del grupo en su código
-      allow update: if signedIn() && resource.data.creator == me()
+      // solo quien administra el grupo puede crear su código (también al crear el grupo)
+      allow create: if signedIn() && request.resource.data.creator == me()
+        && getAfter(/databases/$(database)/documents/groups/$(request.resource.data.gid)).data.creator == me();
+      allow update: if signedIn() && adminOf(resource.data.gid)
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name']);
+      allow delete: if signedIn() && adminOf(resource.data.gid);
     }
 
     match /groups/{gid} {
@@ -40,7 +43,7 @@ service cloud.firestore {
       // Cambios de un miembro: su propia foto, salir, ajustes (según permisos) y preparar rondas
       function isMemberUpdate() {
         return me() in resource.data.members
-          && !changed().hasAny(['creator', 'code', 'createdAt'])
+          && !changed().hasAny(['creator', 'code', 'createdAt', 'name'])
           && (!changed().hasAny(['members'])
               || request.resource.data.members.toSet() == resource.data.members.toSet().difference([me()].toSet()))
           && (!changed().hasAny(['memberInfo']) || infoChanged().hasOnly([me()]))
@@ -61,6 +64,16 @@ service cloud.firestore {
           && infoChanged().hasOnly([who])
           && exists(/databases/$(database)/documents/groups/$(gid)/requests/$(who));
       }
+      // Quien administra cambia el nombre, el código o pasa la administración a otro miembro
+      function isAdminUpdate() {
+        return me() == resource.data.creator
+          && changed().hasOnly(['name', 'code', 'creator'])
+          && (!changed().hasAny(['name'])
+              || (request.resource.data.name is string && request.resource.data.name.size() >= 2 && request.resource.data.name.size() <= 30))
+          && (!changed().hasAny(['creator']) || request.resource.data.creator in resource.data.members)
+          && (!changed().hasAny(['code'])
+              || getAfter(/databases/$(database)/documents/codes/$(request.resource.data.code)).data.gid == gid);
+      }
       // El creador echa a alguien (nunca a sí mismo)
       function isKick() {
         let removed = resource.data.members.toSet().difference(request.resource.data.members.toSet());
@@ -76,7 +89,7 @@ service cloud.firestore {
         && request.resource.data.creator == me()
         && request.resource.data.members == [me()]
         && request.resource.data.memberInfo.keys().hasOnly([me()]);
-      allow update: if signedIn() && (isJoin() || isMemberUpdate() || isApprove() || isKick());
+      allow update: if signedIn() && (isJoin() || isMemberUpdate() || isApprove() || isKick() || isAdminUpdate());
 
       // Solicitudes para entrar: las crea quien quiere entrar y las gestiona el creador
       match /requests/{rid} {
@@ -117,7 +130,8 @@ service cloud.firestore {
         allow create: if isMember(gid)
           && request.resource.data.by == me()
           && request.resource.data.consumed == false
-          && request.resource.data.text.size() <= 160;
+          && request.resource.data.text.size() <= 160
+          && request.resource.data.get('kind', 'q') in ['q', 'd', 'm'];
         allow update: if isMember(gid) && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['consumed']);
         allow delete: if signedIn() && resource.data.by == me() && resource.data.consumed == false;
       }

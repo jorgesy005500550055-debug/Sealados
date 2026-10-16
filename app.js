@@ -1,7 +1,7 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import { getAuth, onAuthStateChanged, createUserWithEmailAndPassword, signInWithEmailAndPassword, sendPasswordResetEmail, signOut } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 import { getFirestore, doc, getDoc, setDoc, updateDoc, addDoc, deleteDoc, collection, query, where, orderBy, limit, onSnapshot, runTransaction, serverTimestamp, arrayUnion, arrayRemove, getDocs, writeBatch, deleteField } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-import { PACKS, DUELS, TEAMQ, BANK_IDX, teamWord } from "./questions.js";
+import { PACKS, BANK_IDX, DUEL_IDX, TEAM_IDX, teamWord } from "./questions.js";
 import { shuffle, makeTeams, makeMatches, schedule, weekStart, buildHistory, stats, makeCode } from "./logic.js";
 
 const firebaseConfig = {
@@ -16,11 +16,13 @@ const fb = initializeApp(firebaseConfig);
 const auth = getAuth(fb);
 const db = getFirestore(fb);
 
-const DEFAULT_SETTINGS = { freqValue: 1, freqUnit: "días", fixedTime: true, releaseTime: "21:00", perRound: 2, packs: ["amistad", "absurdas", "habilidades"], reveal: "instant", duel: true, duelSize: 2, teams: true, teamSize: 2, weekly: 3, editors: "todos", approval: true };
+const DEFAULT_SETTINGS = { freqValue: 1, freqUnit: "días", fixedTime: true, releaseTime: "21:00", perRound: 2, packs: ["amistad", "absurdas", "habilidades"], reveal: "instant", duel: true, duelSize: 2, teams: true, teamSize: 2, weekly: 3, editors: "todos", approval: true,
+  bankEnabled: true, hideQueue: true, showAuthor: true, anonVotes: false, selfVote: true, chatOn: true };
+const opt = (g, k) => g && g.settings && g.settings[k] !== undefined ? g.settings[k] : DEFAULT_SETTINGS[k];
 
 /* ======== Estado ======== */
 const S = { user: null, profile: null, view: "loading", authMode: "signup", groups: [], gid: null, g: null, tab: "hoy", sub: "chat",
-  n: null, next: null, round: null, roundLoaded: false, votes: [], chat: [], queue: [], ranking: null, rankingLoading: false, pendingOpen: null, joinCode: null };
+  n: null, next: null, ptype: "q", pmode: "azar", psel: {}, round: null, roundLoaded: false, votes: [], chat: [], queue: [], ranking: null, rankingLoading: false, pendingOpen: null, joinCode: null };
 let unsub = { groups: null, profile: null, round: null, votes: null, chat: null, queue: null };
 let unsubReq = {}, unsubMyReq = {};
 const codesFixed = new Set();
@@ -143,7 +145,7 @@ const reqsHTML = gid => {
 /* ======== Grupo abierto ======== */
 function openGroup(id) {
   closeGroup(true);
-  S.gid = id; S.g = S.groups.find(x => x.id === id); S.view = "group"; S.tab = "hoy"; S.ranking = null;
+  S.gid = id; S.g = S.groups.find(x => x.id === id); S.view = "group"; S.tab = "hoy"; S.ranking = null; S.psel = {}; S.pmode = "azar"; S.ptype = "q";
   ls.set("senalados-last", id);
   /* los códigos de grupos antiguos no guardaban el nombre; se completa una vez */
   if (S.g && S.g.creator === uid() && !codesFixed.has(S.g.code)) { codesFixed.add(S.g.code); setDoc(doc(db, "codes", S.g.code), { name: S.g.name }, { merge: true }).catch(e => console.error(e)); }
@@ -181,27 +183,62 @@ async function ensureRound(n) {
 async function createRound(n) {
   const gid = S.gid, groupRef = doc(db, "groups", gid), roundRef = doc(db, "groups", gid, "rounds", String(n));
   const qsnap = await getDocs(query(collection(db, "groups", gid, "queue"), where("consumed", "==", false)));
-  const pending = qsnap.docs.map(d => ({ id: d.id, ...d.data() })).sort((a, b) => ms(a.createdAt) - ms(b.createdAt));
+  const pending = qsnap.docs.map(d => ({ id: d.id, ...d.data() })).sort((a, b) => ms(a.createdAt) - ms(b.createdAt)).slice(0, 40);
   return runTransaction(db, async tx => {
     const rs = await tx.get(roundRef); if (rs.exists()) return false;
-    const gs = await tx.get(groupRef); const g = gs.data(), st = g.settings, minor = hasMinor(g);
-    const cands = pending.filter(q => !(minor && q.pack === "picante")).slice(0, st.perRound);
+    const gs = await tx.get(groupRef); const g = gs.data(), st = { ...DEFAULT_SETTINGS, ...g.settings }, minor = hasMinor(g), members = g.members.slice();
     const fresh = [];
-    for (const q of cands) { const qs = await tx.get(doc(db, "groups", gid, "queue", q.id)); if (qs.exists() && qs.data().consumed === false) fresh.push(q); }
-    const questions = fresh.map(q => ({ id: "c-" + q.id, text: q.text, pack: q.pack, by: q.by }));
-    const packs = st.packs.filter(p => PACKS[p] && !(minor && p === "picante"));
+    for (const q of pending) { const qs = await tx.get(doc(db, "groups", gid, "queue", q.id)); if (qs.exists() && qs.data().consumed === false) fresh.push(q); }
+    const okPack = p => !(minor && p === "picante");
+    const packs = st.packs.filter(p => PACKS[p] && okPack(p));
     let used = (g.used || []).slice();
-    let pool = BANK_IDX.filter(q => packs.includes(q.pack) && !used.includes(q.id));
-    const need = st.perRound - questions.length;
-    if (pool.length < need) { used = used.filter(id => !packs.includes(id.split("-")[0])); pool = BANK_IDX.filter(q => packs.includes(q.pack)); }
-    shuffle(pool).slice(0, need).forEach(q => { questions.push({ id: q.id, text: q.text, pack: q.pack }); used.push(q.id); });
-    const members = g.members.slice();
-    let duels = [], matches = [];
-    if (st.duel && members.length >= st.duelSize) { const dq = shuffle(DUELS[st.duelSize]); duels = makeTeams(members, st.duelSize).map((t, i) => ({ id: "d" + i, text: dq[i % dq.length], team: t })); }
-    if (st.teams) { const tq = shuffle(TEAMQ); matches = makeMatches(members, st.teamSize).map((m, i) => ({ id: "m" + i, text: tq[i % tq.length].replace("{e}", teamWord(st.teamSize)), size: st.teamSize, a: m.a, b: m.b })); }
+    /* saca preguntas del banco sin repetir hasta agotar las de los paquetes activos */
+    const draw = (idx, count) => {
+      if (count <= 0 || !st.bankEnabled) return [];
+      let pool = idx.filter(q => packs.includes(q.pack) && !used.includes(q.id));
+      if (pool.length < count) { const ids = new Set(idx.filter(q => packs.includes(q.pack)).map(q => q.id)); used = used.filter(id => !ids.has(id)); pool = idx.filter(q => packs.includes(q.pack)); }
+      const out = shuffle(pool).slice(0, count); out.forEach(q => used.push(q.id)); return out;
+    };
+    const kind = q => q.kind || "q";
+    const allIn = arr => Array.isArray(arr) && arr.length > 0 && arr.every(u => members.includes(u));
+    const consumed = [];
+    /* preguntas normales: primero las propuestas, luego el banco */
+    const qProps = fresh.filter(q => kind(q) === "q" && okPack(q.pack)).slice(0, st.perRound); consumed.push(...qProps);
+    const questions = qProps.map(q => ({ id: "c-" + q.id, text: q.text, pack: q.pack, by: q.by }));
+    draw(BANK_IDX, st.perRound - questions.length).forEach(q => questions.push({ id: q.id, text: q.text, pack: q.pack }));
+    /* duelos: propuestas con personas elegidas (hasta 2), y el sorteo con propuestas libres o banco */
+    const duels = [];
+    if (st.duel) {
+      const dp = fresh.filter(q => kind(q) === "d");
+      const fixed = dp.filter(q => allIn(q.people) && q.people.length >= 2).slice(0, 2);
+      const free = dp.filter(q => !q.people || !q.people.length);
+      fixed.forEach((q, i) => duels.push({ id: "dp" + i, text: q.text, pack: "grupo", by: q.by, team: q.people.map(u => ({ u, dup: false })) }));
+      consumed.push(...fixed);
+      if (members.length >= st.duelSize) {
+        const teams = makeTeams(members, st.duelSize), useFree = free.slice(0, teams.length); consumed.push(...useFree);
+        const bank = draw(DUEL_IDX, teams.length - useFree.length);
+        teams.forEach((t, i) => { const p = useFree[i], b = bank[i - useFree.length];
+          if (p) duels.push({ id: "d" + i, text: p.text, pack: "grupo", by: p.by, team: t });
+          else if (b) duels.push({ id: "d" + i, text: b.text, pack: b.pack, team: t }); });
+      }
+    }
+    /* equipos: igual que los duelos */
+    const matches = [];
+    if (st.teams) {
+      const mp = fresh.filter(q => kind(q) === "m");
+      const fixed = mp.filter(q => allIn(q.sideA) && allIn(q.sideB) && q.sideA.length === q.sideB.length && !q.sideA.some(u => q.sideB.includes(u))).slice(0, 2);
+      const free = mp.filter(q => !(q.sideA && q.sideA.length));
+      fixed.forEach((q, i) => matches.push({ id: "mp" + i, text: q.text, pack: "grupo", by: q.by, size: q.sideA.length, a: q.sideA.map(u => ({ u, dup: false })), b: q.sideB.map(u => ({ u, dup: false })) }));
+      consumed.push(...fixed);
+      const ms2 = makeMatches(members, st.teamSize), useFree = free.slice(0, ms2.length); consumed.push(...useFree);
+      const bank = draw(TEAM_IDX, ms2.length - useFree.length);
+      ms2.forEach((m, i) => { const p = useFree[i], b = bank[i - useFree.length];
+        if (p) matches.push({ id: "m" + i, text: p.text, pack: "grupo", by: p.by, size: st.teamSize, a: m.a, b: m.b });
+        else if (b) matches.push({ id: "m" + i, text: b.text.replace("{e}", teamWord(st.teamSize)), pack: b.pack, size: st.teamSize, a: m.a, b: m.b }); });
+    }
     tx.set(roundRef, { n, members, questions, duels, matches, createdAt: serverTimestamp() });
     tx.update(groupRef, { used });
-    fresh.forEach(q => tx.update(doc(db, "groups", gid, "queue", q.id), { consumed: n }));
+    consumed.forEach(q => tx.update(doc(db, "groups", gid, "queue", q.id), { consumed: n }));
     return true;
   });
 }
@@ -323,67 +360,76 @@ function vGroup(g) {
   if (["hoy", "duelos", "equipos"].includes(S.tab) && !S.round) return head + reqBox + `<div class="card empty">${S.roundLoaded ? "Preparando la ronda…" : "Cargando la ronda…"}</div>`;
   return head + (reqBox ? `<div style="margin-bottom:12px">${reqBox}</div>` : "") + T(g);
 }
-const chips = (v, match) => Object.entries(v).filter(([, x]) => x === match).map(([w]) => `<span class="chip ${w === uid() ? "me" : ""}">${esc(name(w))}</span>`).join("");
-const completeNote = s => `<div class="more"><span class="muted small">${s.n} de ${s.total} han votado · votos visibles</span></div>`;
+const anon = () => opt(S.g, "anonVotes");
+const chips = (v, match) => anon() ? "" : Object.entries(v).filter(([, x]) => x === match).map(([w]) => `<span class="chip ${w === uid() ? "me" : ""}">${esc(name(w))}</span>`).join("");
+const completeNote = s => `<div class="more"><span class="muted small">${s.n} de ${s.total} han votado · ${anon() ? "votos anónimos" : "votos visibles"}</span></div>`;
 const pendingHTML = (s, myPick) => `<div class="pending"><p>Has votado a <b>${myPick}</b>. Han votado ${s.n} de ${s.total}.</p><p class="muted small">Los resultados se verán cuando vote todo el grupo.</p></div>`;
+const byTag = q => q.by && opt(S.g, "showAuthor") ? ` <span class="by">· propuesta de ${esc(q.by === uid() ? "ti" : rawName(q.by))}</span>` : q.by ? ` <span class="by">· propuesta del grupo</span>` : "";
 function resultsHTML(v, options) {
   const total = Object.keys(v).length;
   const counts = options.map(o => ({ o, n: Object.values(v).filter(t => t === o).length })).sort((a, b) => b.n - a.n);
   return `<div class="results">${counts.map((c, i) => `<div class="res">${av(c.o)}<div style="min-width:0"><div class="nm">${esc(name(c.o))}${i === 0 && c.n ? ` <span class="crown">Señalado</span>` : ""}</div>
-    <div class="bar"><i style="width:${pct(c.n, total)}%"></i></div>${c.n ? `<div class="who">${chips(v, c.o)}</div>` : ""}</div>
+    <div class="bar"><i style="width:${pct(c.n, total)}%"></i></div>${c.n && !anon() ? `<div class="who">${chips(v, c.o)}</div>` : ""}</div>
     <div class="n">${pct(c.n, total)}%<small>${votosTxt(c.n)}</small></div></div>`).join("")}</div>`;
 }
 function tHoy(g) {
-  const r = S.round, opts = r.members.filter(m => g.members.includes(m));
-  if (!r.questions.length) return `<div class="card empty">Esta ronda no tiene preguntas. Revisa los paquetes en Ajustes.</div>`;
-  return `<div class="stack"><div class="row"><h2 style="flex:1">Ronda ${r.n}</h2><span class="muted small">${r.questions.length} pregunta${r.questions.length > 1 ? "s" : ""}</span></div>
-  ${r.questions.map(q => {
+  const r = S.round, all = r.members.filter(m => g.members.includes(m)), self = opt(g, "selfVote");
+  const opts = self ? all : all.filter(m => m !== uid());
+  const qs = r.questions.filter(q => !(q.pack === "picante" && hasMinor(g)));
+  if (!qs.length) return `<div class="card empty">${opt(g, "bankEnabled") ? "Esta ronda no tiene preguntas. Revisa los paquetes en Ajustes." : "Esta ronda no tiene preguntas: el banco está desactivado y nadie había propuesto ninguna. Propón una en «Añadir»."}</div>`;
+  return `<div class="stack"><div class="row"><h2 style="flex:1">Ronda ${r.n}</h2><span class="muted small">${qs.length} pregunta${qs.length > 1 ? "s" : ""}</span></div>
+  ${qs.map(q => {
     const v = votesOf("q", q.id), s = voteState(v);
-    if (q.pack === "picante" && hasMinor(g)) return "";
     let body;
     if (!s.mine) body = `<div class="opts">${opts.map(m => `<button class="opt" data-vote="q" data-id="${q.id}" data-to="${esc(m)}">${av(m)}<span>${esc(name(m))}</span></button>`).join("")}</div>`;
-    else if (s.show) body = resultsHTML(v, opts) + completeNote(s);
+    else if (s.show) body = resultsHTML(v, all) + completeNote(s);
     else body = pendingHTML(s, esc(name(v[uid()])));
     return `<article class="ballot" style="${pc(q.pack)}"><div class="q">
-      <span class="tag">${packName(q.pack)}${q.by ? ` <span class="by">· propuesta de ${esc(q.by === uid() ? "ti" : rawName(q.by))}</span>` : ""}</span><h3>${esc(q.text)}</h3>
+      <span class="tag">${packName(q.pack)}${byTag(q)}</span><h3>${esc(q.text)}</h3>
       ${s.mine ? "" : `<span class="muted small">Toca a quien señalas. Verás los votos después de votar.</span>`}</div>${body}</article>`;
   }).join("")}</div>`;
 }
+const subTag = (base, q) => `${base}${q.pack && q.pack !== "grupo" && PACKS[q.pack] ? " · " + PACKS[q.pack].n : ""}${byTag(q)}`;
 function tDuelos(g) {
-  const r = S.round, st = g.settings;
-  if (!r.duels || !r.duels.length) return `<div class="card empty">${st.duel ? "No hay duelos en esta ronda. Se sortearán en la siguiente." : "Los duelos están desactivados. Puedes activarlos en Ajustes."}</div>`;
+  const r = S.round, st = g.settings, self = opt(g, "selfVote");
+  const list = (r.duels || []).filter(d => !(d.pack === "picante" && hasMinor(g)));
+  if (!list.length) return `<div class="card empty">${st.duel ? "No hay duelos en esta ronda. Se sortearán en la siguiente." : "Los duelos están desactivados. Puedes activarlos en Ajustes."}</div>`;
   return `<div class="stack"><div><h2>Duelos de la ronda</h2><p class="muted small" style="margin:4px 0 0">Sorteados al azar en cada ronda, cada uno con su pregunta.</p></div>
-  ${r.duels.map(d => {
+  ${list.map(d => {
     const v = votesOf("d", d.id), s = voteState(v), cnt = u => Object.values(v).filter(x => x === u).length, mx = Math.max(0, ...d.team.map(t => cnt(t.u))), dup = d.team.find(t => t.dup);
-    const f = t => `<button class="fighter ${s.show && cnt(t.u) === mx && mx > 0 ? "won" : ""} ${s.mine && !s.show && v[uid()] === t.u ? "picked" : ""}" data-vote="d" data-id="${d.id}" data-to="${esc(t.u)}" ${s.mine ? "disabled" : ""}>${t.dup ? `<span class="dup">Repite</span>` : ""}${av(t.u, "lg")}<span>${esc(name(t.u))}</span>
-      ${s.show ? `<span class="cnt">${pct(cnt(t.u), s.n)}%</span><span class="votes-n">${votosTxt(cnt(t.u))}</span><span class="who">${chips(v, t.u)}</span>` : ""}</button>`;
-    return `<article class="ballot" style="${pc("duelos")}"><div class="q"><span class="tag">Duelo</span><h3>${esc(d.text)}</h3>${s.mine ? "" : `<span class="muted small">Elige al ganador</span>`}</div>
+    const f = t => { const blocked = !self && t.u === uid() && d.team.length > 1;
+      return `<button class="fighter ${s.show && cnt(t.u) === mx && mx > 0 ? "won" : ""} ${s.mine && !s.show && v[uid()] === t.u ? "picked" : ""}" data-vote="d" data-id="${d.id}" data-to="${esc(t.u)}" ${s.mine || blocked ? "disabled" : ""}>${t.dup ? `<span class="dup">Repite</span>` : ""}${av(t.u, "lg")}<span>${esc(name(t.u))}</span>
+      ${s.show ? `<span class="cnt">${pct(cnt(t.u), s.n)}%</span><span class="votes-n">${votosTxt(cnt(t.u))}</span><span class="who">${chips(v, t.u)}</span>` : ""}</button>`; };
+    return `<article class="ballot" style="${pc("duelos")}"><div class="q"><span class="tag">${subTag("Duelo", d)}</span><h3>${esc(d.text)}</h3>${s.mine ? "" : `<span class="muted small">Elige al ganador</span>`}</div>
       <div class="team ${d.team.length === 2 ? "t2" : "t3"}">${d.team.length === 2 ? f(d.team[0]) + `<span class="vs">VS</span>` + f(d.team[1]) : d.team.map(f).join("")}</div>
       ${dup ? `<p class="muted small dupnote"><b>Repite:</b> sois impares, así que ${esc(dup.u === uid() ? "tú juegas" : rawName(dup.u) + " juega")} dos duelos esta ronda para completar ${d.team.length === 2 ? "la pareja" : "el trío"}.</p>` : ""}
       ${s.show ? completeNote(s) : s.mine ? pendingHTML(s, esc(name(v[uid()]))) : ""}</article>`;
   }).join("")}</div>`;
 }
 function tEquipos(g) {
-  const r = S.round, st = g.settings;
-  if (!r.matches || !r.matches.length) return `<div class="card empty">${!st.teams ? "Los equipos están desactivados. Puedes activarlos en Ajustes." : `No hay enfrentamientos en esta ronda. Para jugar ${st.teamSize} contra ${st.teamSize} hacen falta al menos ${2 * st.teamSize} personas.`}</div>`;
-  return `<div class="stack"><div><h2>${r.matches[0].size} contra ${r.matches[0].size}</h2><p class="muted small" style="margin:4px 0 0">Equipos sorteados al azar en cada ronda. Elige qué ${teamWord(r.matches[0].size)} cuadra mejor con la pregunta.</p></div>
-  ${r.matches.map(m => {
+  const r = S.round, st = g.settings, self = opt(g, "selfVote");
+  const list = (r.matches || []).filter(m => !(m.pack === "picante" && hasMinor(g)));
+  if (!list.length) return `<div class="card empty">${!st.teams ? "Los equipos están desactivados. Puedes activarlos en Ajustes." : `No hay enfrentamientos en esta ronda. Para jugar ${st.teamSize} contra ${st.teamSize} hacen falta al menos ${2 * st.teamSize} personas.`}</div>`;
+  return `<div class="stack"><div><h2>Equipos</h2><p class="muted small" style="margin:4px 0 0">Equipos sorteados al azar en cada ronda. Elige qué equipo cuadra mejor con la pregunta.</p></div>
+  ${list.map(m => {
     const k = m.size, sides = [m.a, m.b], v = votesOf("m", m.id), s = voteState(v), c = i => Object.values(v).filter(x => x === i).length, mx = Math.max(c(0), c(1)), dups = [...m.a, ...m.b].filter(x => x.dup);
     const label = T => andList(T.map(x => esc(name(x.u))));
-    const side = (T, i) => `<button class="fighter squad ${s.show && c(i) === mx && mx > 0 ? "won" : ""} ${s.mine && !s.show && v[uid()] === i ? "picked" : ""}" data-vote="m" data-id="${m.id}" data-to="${i}" ${s.mine ? "disabled" : ""}>
+    const side = (T, i) => { const blocked = !self && T.some(x => x.u === uid());
+      return `<button class="fighter squad ${s.show && c(i) === mx && mx > 0 ? "won" : ""} ${s.mine && !s.show && v[uid()] === i ? "picked" : ""}" data-vote="m" data-id="${m.id}" data-to="${i}" ${s.mine || blocked ? "disabled" : ""}>
       <span class="faces">${T.map(x => av(x.u, "lg")).join("")}</span>
       <span class="names">${andList(T.map(x => esc(name(x.u)) + (x.dup ? " <em>REPITE</em>" : "")))}</span>
-      ${s.show ? `<span class="cnt">${pct(c(i), s.n)}%</span><span class="p-bar"><i style="width:${pct(c(i), s.n)}%"></i></span><span class="votes-n">${votosTxt(c(i))}</span><span class="who">${chips(v, i)}</span>` : ""}</button>`;
-    return `<article class="ballot" style="${pc("equipos")}"><div class="q"><span class="tag">Equipos · ${k} vs ${k}</span><h3>${esc(m.text)}</h3>${s.mine ? "" : `<span class="muted small">Toca el ${teamWord(k)} que elijas</span>`}</div>
+      ${s.show ? `<span class="cnt">${pct(c(i), s.n)}%</span><span class="p-bar"><i style="width:${pct(c(i), s.n)}%"></i></span><span class="votes-n">${votosTxt(c(i))}</span><span class="who">${chips(v, i)}</span>` : ""}</button>`; };
+    return `<article class="ballot" style="${pc("equipos")}"><div class="q"><span class="tag">${subTag(`Equipos · ${k} vs ${k}`, m)}</span><h3>${esc(m.text)}</h3>${s.mine ? "" : `<span class="muted small">Toca el ${teamWord(k)} que elijas</span>`}</div>
       <div class="match">${side(sides[0], 0)}<span class="vs">VS</span>${side(sides[1], 1)}</div>
       ${dups.length ? `<p class="muted small dupnote"><b>Repite:</b> ${andList(dups.map(x => esc(x.u === uid() ? "tú" : rawName(x.u))))} ${dups.length > 1 ? "juegan" : "juega"} dos enfrentamientos para completar los equipos.</p>` : ""}
       ${s.show ? completeNote(s) : s.mine ? pendingHTML(s, label(sides[v[uid()]])) : ""}</article>`;
   }).join("")}</div>`;
 }
 function tGrupo(g) {
+  const chatOn = opt(g, "chatOn"); if (!chatOn) S.sub = "ranking";
   const sub = S.sub;
   if (sub === "ranking" && !S.ranking && !S.rankingLoading) loadRanking();
-  return `<div class="stack"><div class="seg" role="group" aria-label="Sección"><button data-sub="chat" aria-pressed="${sub === "chat"}">Chat</button><button data-sub="ranking" aria-pressed="${sub === "ranking"}">Ranking</button></div>
+  return `<div class="stack">${chatOn ? `<div class="seg" role="group" aria-label="Sección"><button data-sub="chat" aria-pressed="${sub === "chat"}">Chat</button><button data-sub="ranking" aria-pressed="${sub === "ranking"}">Ranking</button></div>` : ""}
   ${sub === "chat" ? vChat(g) : vRanking(g)}</div>`;
 }
 function vChat(g) {
@@ -435,34 +481,63 @@ function vRanking(g) {
     <p class="muted small" style="margin:0">Cada fila es quien vota y cada columna, a quién. Cuanto más oscuro, más veces.</p>
   </section>`;
 }
+const KIND_NAME = { q: "Normal", d: "Duelo", m: "Equipos" };
+function peoplePicker(g) {
+  const kind = S.ptype, sel = S.psel;
+  const others = g.members;
+  if (S.pmode !== "elegir") return "";
+  if (kind === "d") {
+    const n = Object.keys(sel).length;
+    return `<div class="pick">${others.map(m => `<button type="button" class="pchip" data-pick="${esc(m)}" aria-pressed="${!!sel[m]}">${av(m, "sm")}${esc(name(m))}</button>`).join("")}</div>
+      <span class="muted small">${n < 2 ? "Elige 2 o 3 personas." : n + " elegidas."}</span>`;
+  }
+  const a = Object.keys(sel).filter(u => sel[u] === "a").length, b = Object.keys(sel).filter(u => sel[u] === "b").length;
+  return `<div class="pick">${others.map(m => `<button type="button" class="pchip ${sel[m] === "a" ? "ta" : sel[m] === "b" ? "tb" : ""}" data-pick="${esc(m)}">${av(m, "sm")}${esc(name(m))}${sel[m] ? ` <small>${sel[m] === "a" ? "EQUIPO 1" : "EQUIPO 2"}</small>` : ""}</button>`).join("")}</div>
+    <span class="muted small">Toca una vez para el equipo 1 y otra para el equipo 2. Ahora: ${a} contra ${b}${a !== b || a < 2 ? " (tienen que ser iguales, mínimo 2)" : ""}.</span>`;
+}
 function tAdd(g) {
-  const st = g.settings, ws = weekStart(), used = S.queue.filter(q => q.by === uid() && ms(q.createdAt) >= ws).length, left = Math.max(0, st.weekly - used);
+  const st = { ...DEFAULT_SETTINGS, ...g.settings }, ws = weekStart(), used = S.queue.filter(q => q.by === uid() && ms(q.createdAt) >= ws).length, left = Math.max(0, st.weekly - used);
+  const kind = S.ptype, dis = left ? "" : "disabled";
   const pending = S.queue.filter(q => q.consumed === false).sort((a, b) => ms(a.createdAt) - ms(b.createdAt));
+  const hidden = st.hideQueue, mine = pending.filter(q => q.by === uid()), othersN = pending.length - mine.length;
+  const shown = hidden ? mine : pending;
   const opts = Object.entries(PACKS).filter(([k]) => !(hasMinor(g) && k === "picante")).map(([k, p]) => `<option value="${k}">${p.n}</option>`).join("");
+  const ph = { q: "¿Quién es más probable que…?", d: "¿Quién ganaría…? (entre 2 o 3 personas)", m: "¿Qué pareja…? / ¿Qué equipo…?" }[kind];
+  const off = kind === "d" && !st.duel ? "Los duelos están desactivados en este grupo: tu pregunta esperará hasta que se activen." : kind === "m" && !st.teams ? "Los equipos están desactivados en este grupo: tu pregunta esperará hasta que se activen." : "";
+  const qIdx = {}; let qi = 0; pending.forEach(q => { if ((q.kind || "q") === "q") qIdx[q.id] = qi++; });
+  const when = q => (q.kind || "q") === "q" ? `sale en la ronda ${S.n + 1 + Math.floor(qIdx[q.id] / st.perRound)}` : "sale en una de las próximas rondas";
+  const who = q => q.people && q.people.length ? " · " + andList(q.people.map(u => esc(name(u)))) : q.sideA && q.sideA.length ? " · " + andList(q.sideA.map(u => esc(name(u)))) + " contra " + andList(q.sideB.map(u => esc(name(u)))) : "";
   return `<div class="stack">
   <form id="f-add" class="card stack" novalidate>
     <h2>Propón una pregunta</h2>
     <div class="row" style="justify-content:space-between"><span class="muted small">Te quedan <b>${left}</b> de ${st.weekly} esta semana</span><span class="quota" aria-hidden="true">${Array.from({ length: st.weekly }, (_, i) => `<i class="${i < used ? "" : "on"}"></i>`).join("")}</span></div>
-    <div class="field"><label for="a-text">Pregunta</label><textarea id="a-text" maxlength="140" placeholder="¿Quién es más probable que…?" ${left ? "" : "disabled"}></textarea></div>
-    <div class="field"><label for="a-pack">Paquete</label><select id="a-pack" ${left ? "" : "disabled"}><option value="grupo">Del grupo (sale siempre)</option>${opts}</select></div>
+    <div class="seg" role="group" aria-label="Tipo de pregunta">${["q", "d", "m"].map(k => `<button type="button" data-ptype="${k}" aria-pressed="${kind === k}" ${dis}>${KIND_NAME[k]}</button>`).join("")}</div>
+    <div class="field"><label for="a-text">Pregunta</label><textarea id="a-text" maxlength="140" placeholder="${ph}" ${dis}></textarea></div>
+    ${kind === "q" ? `<div class="field"><label for="a-pack">Paquete</label><select id="a-pack" ${dis}><option value="grupo">Del grupo (sale siempre)</option>${opts}</select></div>`
+      : `<div class="field"><label>¿Quién sale?</label><div class="seg" role="group" aria-label="Personas"><button type="button" data-pmode="azar" aria-pressed="${S.pmode !== "elegir"}" ${dis}>Al azar</button><button type="button" data-pmode="elegir" aria-pressed="${S.pmode === "elegir"}" ${dis}>Elegir personas</button></div></div>${peoplePicker(g)}`}
+    ${off ? `<span class="small" style="color:var(--warn)">${off}</span>` : ""}
     <div class="err" id="a-err">${left ? "" : "Has llegado al límite de esta semana. Se renueva el lunes."}</div>
-    <button class="btn" type="submit" ${left ? "" : "disabled"}>Añadir a la cola</button>
+    <button class="btn" type="submit" ${dis}>Añadir a la cola</button>
   </form>
-  <div class="card"><h2 style="margin-bottom:6px">En cola (${pending.length})</h2>
-    <p class="muted small" style="margin:0 0 6px">Las preguntas de los jugadores salen antes que las del banco, en orden de llegada.</p>
-    ${pending.length ? pending.map((q, i) => `<div class="qitem"><div class="t"><div style="font-weight:600">${esc(q.text)}</div><div class="muted small">${esc(q.by === uid() ? "Tú" : rawName(q.by))} · ${packName(q.pack)} · sale en la ronda ${S.n + 1 + Math.floor(i / st.perRound)}</div></div>${q.by === uid() ? `<button class="del" data-delq="${q.id}">Quitar</button>` : ""}</div>`).join("") : `<p class="muted" style="margin:6px 0 0">No hay preguntas propuestas. La siguiente ronda saldrá del banco.</p>`}
+  <div class="card"><h2 style="margin-bottom:6px">${hidden ? "Tus preguntas en cola" : "En cola"} (${shown.length})</h2>
+    <p class="muted small" style="margin:0 0 6px">${hidden ? "Las preguntas propuestas están ocultas hasta que salen." : "Las preguntas de los jugadores salen antes que las del banco, en orden de llegada."}</p>
+    ${shown.length ? shown.map(q => `<div class="qitem"><div class="t"><div style="font-weight:600">${esc(q.text)}</div><div class="muted small">${hidden ? "" : esc(q.by === uid() ? "Tú" : rawName(q.by)) + " · "}${KIND_NAME[q.kind || "q"]}${(q.kind || "q") === "q" ? " · " + packName(q.pack) : ""}${who(q)} · ${when(q)}</div></div>${q.by === uid() ? `<button class="del" data-delq="${q.id}">Quitar</button>` : ""}</div>`).join("") : `<p class="muted" style="margin:6px 0 0">${hidden ? "No tienes preguntas en cola." : "No hay preguntas propuestas. La siguiente ronda saldrá del banco."}</p>`}
+    ${hidden && othersN ? `<p class="muted small" style="margin:8px 0 0">Y ${othersN} pregunta${othersN > 1 ? "s" : ""} de otras personas, ocultas hasta que salgan.</p>` : ""}
   </div></div>`;
 }
 function tSet(g) {
-  const st = g.settings, ed = canEdit(g), dis = ed ? "" : "disabled", hasPh = !!info(uid()).photo, minor = hasMinor(g), creator = g.creator === uid();
+  const st = { ...DEFAULT_SETTINGS, ...g.settings }, ed = canEdit(g), dis = ed ? "" : "disabled", hasPh = !!info(uid()).photo, minor = hasMinor(g), creator = g.creator === uid();
   const seg = (key, vals, label, offc = !ed) => `<div class="seg" role="group" aria-label="${label}">${vals.map(([v, t]) => `<button type="button" data-set="${key}" data-val="${v}" aria-pressed="${String(st[key]) === String(v)}" ${offc ? "disabled" : ""}>${t}</button>`).join("")}</div>`;
   const stepper = (key, txt = "") => `<div class="stepper"><button type="button" data-step="${key}" data-d="-1" aria-label="Menos" ${dis}>−</button><b>${st[key]}</b><button type="button" data-step="${key}" data-d="1" aria-label="Más" ${dis}>+</button>${txt ? `<span class="muted small">${txt}</span>` : ""}</div>`;
+  const sw = (key, title, desc) => `<div class="switch"><div><b>${title}</b><div class="muted small">${desc}</div></div><input type="checkbox" id="s-${key}" data-fresh data-setkey="${key}" aria-label="${title}" ${st[key] ? "checked" : ""} ${dis}></div>`;
+  const others = g.members.filter(m => m !== uid());
   return `<div class="stack">
   <section class="card set"><h3>Tu foto en ${esc(g.name)}</h3>
     <div class="row">${av(uid(), "xl")}<label class="btn alt sm" for="ph-in">${hasPh ? "Cambiar foto" : "Subir foto"}</label><input type="file" id="ph-in" accept="image/*" hidden>${hasPh ? `<button class="del" data-act="ph-del">Quitar</button>` : ""}</div>
     <span class="muted small">Solo se ve en este grupo. En cada grupo puedes tener una foto distinta.</span>
   </section>
   ${ed ? "" : `<div class="demo-note">Solo ${esc(rawName(g.creator))} puede cambiar los ajustes del juego en este grupo.</div>`}
+  <h2 style="margin-top:6px">Rondas</h2>
   <section class="card set"><h3>Cada cuánto sale una ronda</h3>
     <div class="row" style="flex-wrap:nowrap">${stepper("freqValue")}<div style="flex:1">${seg("freqUnit", [["horas", "Horas"], ["días", "Días"], ["semanas", "Semanas"]], "Unidad")}</div></div>
     ${st.freqUnit === "horas" ? "" : `<div class="switch"><div><b>Hora fija de salida</b><div class="muted small">Todos reciben la ronda a la vez</div></div><input type="checkbox" id="s-fixed" data-fresh aria-label="Hora fija de salida" ${st.fixedTime ? "checked" : ""} ${dis}></div>
@@ -471,12 +546,9 @@ function tSet(g) {
   </section>
   <p class="muted small" style="margin:0">Los cambios de preguntas, paquetes, duelos y equipos se aplican desde la siguiente ronda.</p>
   <section class="card set"><h3>Preguntas por ronda</h3>${stepper("perRound", st.perRound === 1 ? "Una cada vez" : "Salen todas a la vez")}</section>
-  <section class="card set"><h3>Cuándo se ven los resultados</h3>
-    ${seg("reveal", [["instant", "Al votar"], ["all", "Cuando voten todos"]], "Resultados")}
-    <span class="muted small">${st.reveal === "instant" ? "Cada persona ve los votos en cuanto vota, aunque falte gente." : "Los votos se muestran cuando ha votado todo el grupo."} Nadie ve nada antes de votar.</span>
-  </section>
-  <section class="card set"><h3>Paquetes activos</h3>
+  <section class="card set"><h3>Paquetes activos</h3><span class="muted small">Valen para las preguntas normales, los duelos y los equipos.</span>
     <div class="packs">${Object.entries(PACKS).map(([k, p]) => { const lock = p.adult && minor; return `<button type="button" class="pack" style="${pc(k)}" data-pack="${k}" aria-pressed="${st.packs.includes(k) && !lock}" ${dis || lock ? "disabled" : ""}><span class="ck"></span><b>${p.n} ${p.adult ? `<span class="adult">+18</span>` : ""}</b><small>${lock ? "Bloqueado: hay menores de 18 en el grupo" : p.d}</small></button>`; }).join("")}</div>
+    ${sw("bankEnabled", "Usar el banco de preguntas", "Si lo apagas, solo salen las preguntas que propone el grupo")}
   </section>
   <section class="card set"><div class="switch"><div><h3>Duelos</h3><span class="muted small">Pregunta extra por parejas o tríos al azar</span></div><input type="checkbox" id="s-duel" data-fresh aria-label="Duelos" ${st.duel ? "checked" : ""} ${dis}></div>
     ${st.duel ? seg("duelSize", [["2", "Parejas"], ["3", "Tríos"]], "Tamaño del duelo") : ""}
@@ -484,19 +556,44 @@ function tSet(g) {
   <section class="card set"><div class="switch"><div><h3>Equipos</h3><span class="muted small">Enfrentamientos de equipos al azar con su propia pregunta</span></div><input type="checkbox" id="s-teams" data-fresh aria-label="Equipos" ${st.teams ? "checked" : ""} ${dis}></div>
     ${st.teams ? seg("teamSize", [["2", "2 vs 2"], ["3", "3 vs 3"], ["4", "4 vs 4"]], "Tamaño de los equipos") + (g.members.length < 2 * st.teamSize ? `<span class="small" style="color:var(--warn)">Hacen falta al menos ${2 * st.teamSize} personas para ${st.teamSize} contra ${st.teamSize}.</span>` : "") : ""}
   </section>
-  <section class="card set"><h3>Preguntas que puede proponer cada persona</h3>${stepper("weekly", "por semana")}</section>
-  <section class="card set"><h3>Quién puede cambiar los ajustes</h3>
-    ${creator ? `${seg("editors", [["todos", "Todo el grupo"], ["creador", "Solo yo"]], "Permisos", false)}<span class="muted small">${st.editors === "todos" ? "Cualquier miembro puede cambiar los ajustes del juego." : "Solo tú puedes cambiar los ajustes del juego. El resto los verá bloqueados."}</span>`
-      : `${seg("editors", [["todos", "Todo el grupo"], ["creador", "Solo " + esc(rawName(g.creator))]], "Permisos", true)}<span class="muted small">Esto solo lo puede cambiar quien creó el grupo (${esc(rawName(g.creator))}).</span>`}
+  <h2 style="margin-top:6px">Votos</h2>
+  <section class="card set"><h3>Cuándo se ven los resultados</h3>
+    ${seg("reveal", [["instant", "Al votar"], ["all", "Cuando voten todos"]], "Resultados")}
+    <span class="muted small">${st.reveal === "instant" ? "Cada persona ve los votos en cuanto vota, aunque falte gente." : "Los votos se muestran cuando ha votado todo el grupo."} Nadie ve nada antes de votar.</span>
+    ${sw("anonVotes", "Votos anónimos", "Se ven los porcentajes, pero no quién ha votado a quién")}
+    ${sw("selfVote", "Se puede votar a uno mismo", "Si lo apagas, nadie puede señalarse a sí mismo ni a su equipo")}
   </section>
+  <h2 style="margin-top:6px">Preguntas propuestas</h2>
+  <section class="card set">
+    <b>Preguntas por persona y semana</b>${stepper("weekly")}
+    ${sw("hideQueue", "Ocultas hasta que salgan", "Nadie ve las preguntas de los demás hasta que aparecen en una ronda")}
+    ${sw("showAuthor", "Mostrar quién la propuso", "Al salir, la pregunta indica quién la escribió")}
+  </section>
+  <h2 style="margin-top:6px">Grupo</h2>
+  <section class="card set">${sw("chatOn", "Chat del grupo", "Si lo apagas, en la pestaña del grupo solo queda el ranking")}</section>
+  ${creator ? `<section class="card set"><h3>Nombre del grupo</h3>
+    <div class="row" style="flex-wrap:nowrap"><input type="text" id="s-name" maxlength="30" value="${esc(g.name)}" aria-label="Nombre del grupo"><button class="btn sm" data-act="rename">Guardar</button></div>
+  </section>
+  <section class="card set"><h3>Código de invitación</h3>
+    <div class="row"><span class="code">${esc(g.code)}</span><button class="btn alt sm" data-act="newcode">Cambiar código</button></div>
+    <span class="muted small">Si el código ha llegado a quien no debía, crea uno nuevo. El anterior deja de funcionar.</span>
+  </section>` : ""}
   <section class="card set"><h3>Para entrar al grupo</h3>
     ${creator ? `<div class="seg" role="group" aria-label="Entrada"><button type="button" data-set="approval" data-val="true" aria-pressed="${st.approval !== false}">Con mi aprobación</button><button type="button" data-set="approval" data-val="false" aria-pressed="${st.approval === false}">Libre con el código</button></div>
       <span class="muted small">${st.approval !== false ? "Quien use el código te enviará una solicitud y tendrás que aceptarla." : "Cualquiera con el código entra directamente."}</span>`
       : `<span class="muted">${st.approval !== false ? "Hace falta que " + esc(rawName(g.creator)) + " acepte a quien quiera entrar." : "Cualquiera con el código entra directamente."}</span>`}
   </section>
-  <section class="card set"><h3>Miembros (${g.members.length})</h3>
-    ${g.members.map(m => `<div class="row" style="flex-wrap:nowrap">${av(m)}<span style="flex:1;min-width:0">${esc(rawName(m))}${m === g.creator ? ` <span class="chip">creador</span>` : ""}${m === uid() ? ` <span class="chip me">tú</span>` : ""}</span>${creator && m !== uid() ? `<button class="del" data-kick="${esc(m)}" style="color:var(--p-picante)">Echar</button>` : ""}</div>`).join("")}
+  <section class="card set"><h3>Quién puede cambiar los ajustes del juego</h3>
+    ${creator ? `${seg("editors", [["todos", "Todo el grupo"], ["creador", "Solo yo"]], "Permisos", false)}<span class="muted small">${st.editors === "todos" ? "Cualquier miembro puede cambiar rondas, paquetes, votos y preguntas." : "Solo tú puedes cambiar los ajustes del juego. El resto los verá bloqueados."}</span>`
+      : `${seg("editors", [["todos", "Todo el grupo"], ["creador", "Solo " + esc(rawName(g.creator))]], "Permisos", true)}<span class="muted small">Esto solo lo puede cambiar quien administra el grupo (${esc(rawName(g.creator))}).</span>`}
   </section>
+  <section class="card set"><h3>Miembros (${g.members.length})</h3>
+    ${g.members.map(m => `<div class="row" style="flex-wrap:nowrap">${av(m)}<span style="flex:1;min-width:0">${esc(rawName(m))}${m === g.creator ? ` <span class="chip">admin</span>` : ""}${m === uid() ? ` <span class="chip me">tú</span>` : ""}</span>${creator && m !== uid() ? `<button class="del" data-kick="${esc(m)}" style="color:var(--p-picante)">Echar</button>` : ""}</div>`).join("")}
+  </section>
+  ${creator && others.length ? `<section class="card set"><h3>Pasar la administración</h3>
+    <div class="row" style="flex-wrap:nowrap"><select id="s-admin" aria-label="Nuevo administrador">${others.map(m => `<option value="${esc(m)}">${esc(rawName(m))}</option>`).join("")}</select><button class="btn alt sm" data-act="transfer">Pasar</button></div>
+    <span class="muted small">Esa persona pasará a controlar el grupo y tú serás un miembro más.</span>
+  </section>` : ""}
   ${creator ? "" : `<button class="btn alt" data-act="leave">Salir del grupo</button>`}
   <button class="del" data-act="logout" style="align-self:center">Cerrar sesión</button>
   </div>`;
@@ -578,11 +675,18 @@ document.addEventListener("submit", async e => {
     } catch (x) { err.textContent = errText(x); setBusy(f, false); }
   }
   if (id === "f-add") {
-    const t = $("#a-text").value.trim(), err = $("#a-err"), st = S.g.settings, ws = weekStart();
+    const t = $("#a-text").value.trim(), err = $("#a-err"), st = { ...DEFAULT_SETTINGS, ...S.g.settings }, ws = weekStart(), kind = S.ptype;
     if (S.queue.filter(q => q.by === uid() && ms(q.createdAt) >= ws).length >= st.weekly) return err.textContent = "Has llegado al límite de esta semana. Se renueva el lunes.";
     if (t.length < 10) return err.textContent = "Escribe la pregunta completa (mínimo 10 caracteres).";
+    const data = { kind, text: t.endsWith("?") ? t : t + "?", pack: kind === "q" ? $("#a-pack").value : "grupo", by: uid(), consumed: false, createdAt: serverTimestamp() };
+    if (kind !== "q" && S.pmode === "elegir") {
+      const sel = S.psel;
+      if (kind === "d") { const ppl = Object.keys(sel).filter(u => sel[u]); if (ppl.length < 2 || ppl.length > 3) return err.textContent = "Para un duelo elige 2 o 3 personas, o déjalo al azar."; data.people = ppl; }
+      else { const a = Object.keys(sel).filter(u => sel[u] === "a"), b = Object.keys(sel).filter(u => sel[u] === "b");
+        if (a.length < 2 || a.length !== b.length || a.length > 4) return err.textContent = "Los dos equipos tienen que tener las mismas personas (de 2 a 4), o déjalo al azar."; data.sideA = a; data.sideB = b; }
+    }
     setBusy(f, true);
-    try { await addDoc(col("queue"), { text: t.endsWith("?") ? t : t + "?", pack: $("#a-pack").value, by: uid(), consumed: false, createdAt: serverTimestamp() }); $("#a-text").value = ""; toast("Añadida a la cola"); }
+    try { await addDoc(col("queue"), data); $("#a-text").value = ""; S.psel = {}; S.pmode = "azar"; toast("Añadida a la cola"); }
     catch (x) { fail(x); } setBusy(f, false); render();
   }
   if (id === "f-chat") {
@@ -600,6 +704,7 @@ function loadPhoto(file, cb) {
 }
 document.addEventListener("change", e => {
   if (!S.g) return; const t = e.target;
+  if (t.dataset.setkey) updateSettings({ [t.dataset.setkey]: t.checked });
   if (t.id === "s-duel") updateSettings({ duel: t.checked });
   if (t.id === "s-teams") updateSettings({ teams: t.checked });
   if (t.id === "s-fixed") updateSettings({ fixedTime: t.checked }, true);
@@ -619,6 +724,31 @@ document.addEventListener("click", async e => {
   else if (d.step) { const st = g.settings, lim = { perRound: [1, 5], freqValue: [1, 30], weekly: [1, 20] }[d.step]; const v = Math.min(lim[1], Math.max(lim[0], st[d.step] + Number(d.d))); if (v !== st[d.step]) updateSettings({ [d.step]: v }, d.step === "freqValue"); }
   else if (d.set) { const v = (d.set === "duelSize" || d.set === "teamSize") ? Number(d.val) : d.set === "approval" ? d.val === "true" : d.val; updateSettings({ [d.set]: v }, d.set === "freqUnit"); if (d.set === "editors") toast(v === "todos" ? "Todo el grupo puede cambiar los ajustes" : "Solo tú puedes cambiar los ajustes"); }
   else if (d.pack) { const p = g.settings.packs.slice(), i = p.indexOf(d.pack); if (i >= 0) { if (p.length === 1) { toast("Deja al menos un paquete activo"); return; } p.splice(i, 1); } else p.push(d.pack); updateSettings({ packs: p }); }
+  else if (d.ptype) { S.ptype = d.ptype; S.psel = {}; render(); }
+  else if (d.pmode) { S.pmode = d.pmode; S.psel = {}; render(); }
+  else if (d.pick) {
+    const u = d.pick, sel = S.psel;
+    if (S.ptype === "d") { if (sel[u]) delete sel[u]; else if (Object.keys(sel).length < 3) sel[u] = "x"; else toast("Máximo 3 personas en un duelo"); }
+    else if (!sel[u]) sel[u] = "a"; else if (sel[u] === "a") sel[u] = "b"; else delete sel[u];
+    render();
+  }
+  else if (d.act === "rename") {
+    const n = ($("#s-name").value || "").trim(); if (n.length < 2) { toast("El nombre necesita al menos 2 letras"); return; }
+    try { await updateDoc(gref(), { name: n }); setDoc(doc(db, "codes", g.code), { name: n }, { merge: true }).catch(() => {}); toast("Nombre cambiado"); } catch (x) { fail(x); } }
+  else if (d.act === "newcode") {
+    if (!b.dataset.sure) { b.dataset.sure = "1"; b.textContent = "¿Seguro? Toca otra vez"; setTimeout(() => { if (b.isConnected) { delete b.dataset.sure; b.textContent = "Cambiar código"; } }, 4000); return; }
+    try {
+      let code; for (let i = 0; i < 5; i++) { code = makeCode(); if (!(await getDoc(doc(db, "codes", code))).exists()) break; }
+      const bt = writeBatch(db), old = g.code;
+      bt.set(doc(db, "codes", code), { gid: S.gid, creator: uid(), name: g.name });
+      bt.update(gref(), { code });
+      bt.delete(doc(db, "codes", old));
+      await bt.commit(); toast("Código nuevo: " + code);
+    } catch (x) { fail(x); } }
+  else if (d.act === "transfer") {
+    const to = $("#s-admin").value; if (!to) return;
+    if (!b.dataset.sure) { b.dataset.sure = "1"; b.textContent = "¿Seguro? Toca otra vez"; setTimeout(() => { if (b.isConnected) { delete b.dataset.sure; b.textContent = "Pasar"; } }, 4000); return; }
+    try { await updateDoc(gref(), { creator: to }); toast(rawName(to) + " administra ahora el grupo"); } catch (x) { fail(x); } }
   else if (d.approve) {
     const r = (S.reqs[d.gid] || []).find(x => x.id === d.approve); if (!r) return;
     try { const bt = writeBatch(db);

@@ -59,30 +59,84 @@ export const BANK = {
     "¿Quién tendría una paloma como mejor amiga en otra vida?","¿Quién sería invitado a un programa de la tele por error y triunfaría?"
   ],
 };
-export const DUELS = {
-  2:[
-    "¿Quién ganaría un torneo de futbolín?","¿Quién aguantaría más tiempo sin mirar el móvil?","¿Quién ganaría una pelea de almohadas dentro de un ascensor?",
-    "¿Quién conseguiría antes que un desconocido le invite a un café?","¿Quién comería más croquetas en cinco minutos?","¿Quién ganaría un duelo de miradas sin parpadear?",
-    "¿Quién montaría antes una tienda de campaña a oscuras?","¿Quién ganaría un pulso con la mano mala?","¿Quién llegaría antes a Cuenca haciendo autostop?",
-    "¿Quién saldría elegido alcalde si os presentáis los dos?","¿Quién calmaría antes a un bebé que no para de llorar?","¿Quién conseguiría más likes con una foto de su desayuno?",
-    "¿Quién ganaría un concurso de bailar con los ojos cerrados?","¿Quién aguantaría más en una sala con un mimo que no para de imitarle?"
+/* Duelos: valen para 2 o 3 personas. Equipos: {e} se cambia por "pareja", "trío" o "equipo". Mismos paquetes que las preguntas normales. */
+export const DUELQ = {
+  clasicas:[
+    "¿Quién ganaría un torneo de futbolín?","¿Quién aguantaría más tiempo sin mirar el móvil?","¿Quién ganaría un duelo de miradas sin parpadear?",
+    "¿Quién comería más croquetas en cinco minutos?","¿Quién ganaría un pulso con la mano mala?","¿Quién llegaría antes a Cuenca haciendo autostop?",
+    "¿Quién ganaría una partida a muerte de Uno?","¿Quién se quedaría dormido antes en una peli de tres horas?","¿Quién aguantaría más en una sala con un mimo que no para de imitarle?",
+    "¿Quién ganaría al piedra, papel o tijera al mejor de cien?","¿Quién conseguiría más likes con una foto de su desayuno?","¿Quién saldría elegido alcalde si os presentáis a la vez?"
   ],
-  3:[
-    "¿Quién de los tres ganaría una partida a muerte de Uno?","¿Quién de los tres sobreviviría más rondas en un concurso de la tele?","¿Quién de los tres convencería antes a un portero de discoteca?",
-    "¿Quién de los tres encontraría antes las llaves perdidas en un festival?","¿Quién de los tres ganaría un concurso de karaoke con la peor canción posible?",
-    "¿Quién de los tres sería el último en pie en un juego de las sillas?","¿Quién de los tres negociaría mejor la liberación de un rehén imaginario?",
-    "¿Quién de los tres vendería antes un boli a un desconocido?"
+  amistad:[
+    "¿Quién se acordaría antes de tu cumpleaños sin avisos del móvil?","¿Quién vendría antes a buscarte a las 4 de la mañana?","¿Quién guardaría mejor un secreto bajo interrogatorio?",
+    "¿Quién organizaría mejor una fiesta sorpresa?","¿Quién te prestaría antes su último billete de 20 €?","¿Quién se sabe mejor tu pedido en tu bar de siempre?",
+    "¿Quién daría el mejor discurso en tu boda?","¿Quién te diría antes una verdad incómoda a la cara?","¿Quién aguantaría más escuchando tus dramas sin mirar el móvil?",
+    "¿Quién se presentaría antes con caldo si estás malo?","¿Quién te ayudaría a mudarte a un sexto sin ascensor?","¿Quién escucharía antes entero tu audio de nueve minutos?"
+  ],
+  picante:[
+    "¿Quién ligaría antes en una discoteca sin decir una palabra?","¿Quién tiene el historial de búsqueda más comprometido?","¿Quién conseguiría antes el número de alguien en el metro?",
+    "¿Quién ha mandado más mensajes de los que se arrepiente a las 3 de la mañana?","¿Quién tiene más ex que siguen viendo sus stories?","¿Quién aguantaría más tiempo sin ligar ni una sola vez?",
+    "¿Quién se pondría más rojo en un verdad o reto?","¿Quién tiene la fantasía más inconfesable?","¿Quién se liaría antes con alguien del trabajo?",
+    "¿Quién tiene la playlist más peligrosa para una cita?","¿Quién volvería antes a escribir a un ex?","¿Quién ganaría un concurso de frases para ligar malísimas?"
+  ],
+  peligro:[
+    "¿Quién saltaría antes desde la roca más alta de la cala?","¿Quién acariciaría antes a un animal salvaje porque «parecía majo»?","¿Quién se perdería antes en una ruta de montaña?",
+    "¿Quién se comería el chile más picante sin pedir agua?","¿Quién haría más kilómetros con la reserva encendida?","¿Quién bajaría antes una pista negra el primer día?",
+    "¿Quién se colaría antes en una boda de desconocidos?","¿Quién aguantaría más en una montaña rusa extrema sin gritar?","¿Quién se metería antes en una cueva sin linterna?",
+    "¿Quién duraría más en una película de terror en la vida real?","¿Quién se apuntaría antes a un reto viral absurdo?","¿Quién sobreviviría más en un apocalipsis zombi?"
+  ],
+  habilidades:[
+    "¿Quién montaría antes un mueble sin instrucciones?","¿Quién cocinaría mejor con 10 € y media hora?","¿Quién aparcaría a la primera en un hueco imposible?",
+    "¿Quién saldría antes de un escape room?","¿Quién imitaría mejor el acento de otra comunidad?","¿Quién ganaría un debate defendiendo algo absurdo?",
+    "¿Quién dibujaría el retrato más reconocible en dos minutos?","¿Quién se orientaría mejor en una ciudad sin mapa?","¿Quién regatearía mejor en un mercadillo?",
+    "¿Quién aprendería antes a hacer malabares con tres pelotas?","¿Quién ganaría un concurso de karaoke?","¿Quién convencería antes a un revisor de que no le multe?"
+  ],
+  absurdas:[
+    "¿Quién ganaría una pelea de almohadas dentro de un ascensor?","¿Quién convencería antes a una paloma de que le siga?","¿Quién duraría más viviendo en un IKEA sin que le pillen?",
+    "¿Quién sería mejor presidente de la comunidad de vecinos?","¿Quién ganaría una carrera montado en un carrito de la compra?","¿Quién se haría antes amigo de un fantasma?",
+    "¿Quién sería el último en enterarse de una invasión alienígena?","¿Quién vendería antes un boli a un desconocido por 20 €?","¿Quién aguantaría más hablando solo con preguntas?",
+    "¿Quién ganaría un concurso de bailar con los ojos cerrados?","¿Quién sería mejor villano de una peli de dibujos?","¿Quién calmaría antes a un bebé que no para de llorar?"
   ]
 };
-/* {e} se sustituye por "pareja", "trío" o "equipo" según el tamaño */
-export const TEAMQ=[
-  "¿Qué {e} ganaría una partida de futbolín a diez goles?","¿Qué {e} saldría antes de un escape room?","¿Qué {e} ganaría al Pictionary en la sobremesa de Navidad?",
-  "¿Qué {e} montaría el mejor chiringuito de playa en un fin de semana?","¿Qué {e} duraría más en un reality en una isla desierta?","¿Qué {e} cocinaría mejor con lo que sobra en la nevera?",
-  "¿Qué {e} ganaría la gymkana de una despedida de soltero?","¿Qué {e} daría el mejor golpe en una peli de atracos?","¿Qué {e} ganaría el concurso de disfraces de Carnaval?",
-  "¿Qué {e} perdería antes el coche en el parking del aeropuerto?","¿Qué {e} ganaría una partida de mus apostando la cena?","¿Qué {e} acertaría más en un trivial a las 4 de la mañana?",
-  "¿Qué {e} ganaría una guerra de bolas de nieve?","¿Qué {e} se perdería antes en una ruta de montaña?","¿Qué {e} cantaría peor en un karaoke y lo daría todo igual?",
-  "¿Qué {e} conseguiría más firmas para una causa absurda en una hora?","¿Qué {e} ganaría una carrera de relevos con una cuchara y un huevo?","¿Qué {e} se pondría antes de acuerdo para elegir restaurante?",
-  "¿Qué {e} haría una mudanza sin romper nada?","¿Qué {e} construiría la torre más alta con espaguetis?"
-];
+export const TEAMQ = {
+  clasicas:[
+    "¿Qué {e} ganaría una partida de futbolín a diez goles?","¿Qué {e} ganaría al Pictionary en la sobremesa de Navidad?","¿Qué {e} ganaría una partida de mus apostando la cena?",
+    "¿Qué {e} acertaría más en un trivial a las 4 de la mañana?","¿Qué {e} ganaría una guerra de bolas de nieve?","¿Qué {e} ganaría el concurso de disfraces de Carnaval?",
+    "¿Qué {e} ganaría una partida de cartas en el tren?","¿Qué {e} terminaría antes un puzle de mil piezas?","¿Qué {e} llegaría más tarde a una cena?",
+    "¿Qué {e} ganaría al Party a las tantas?"
+  ],
+  amistad:[
+    "¿Qué {e} organizaría mejor un viaje de fin de semana?","¿Qué {e} se pondría antes de acuerdo para elegir restaurante?","¿Qué {e} haría una mudanza sin romper nada?",
+    "¿Qué {e} montaría mejor una fiesta sorpresa?","¿Qué {e} sobreviviría mejor a convivir un mes en un piso de 40 m²?","¿Qué {e} cuidaría mejor de tu perro una semana?",
+    "¿Qué {e} aguantaría más un viaje en furgoneta sin discutir?","¿Qué {e} se sabe más secretos del grupo?","¿Qué {e} haría la mejor sobremesa de domingo?",
+    "¿Qué {e} llegaría antes si les llamas con una urgencia?"
+  ],
+  picante:[
+    "¿Qué {e} conseguiría más números de teléfono en una noche?","¿Qué {e} ganaría un verdad o reto sin rajarse?","¿Qué {e} tiene más historias de fiesta que no se pueden contar?",
+    "¿Qué {e} montaría la despedida de soltero más descontrolada?","¿Qué {e} acabaría antes en un jacuzzi con desconocidos?","¿Qué {e} ligaría más en un viaje a Ibiza?",
+    "¿Qué {e} se pondría más roja en una clase de baile sensual?","¿Qué {e} tendría más matches en una semana?","¿Qué {e} saldría peor parada en un «yo nunca»?",
+    "¿Qué {e} volvería a casa más tarde tras una noche de fiesta?"
+  ],
+  peligro:[
+    "¿Qué {e} duraría más en un reality en una isla desierta?","¿Qué {e} se perdería antes en una ruta de montaña?","¿Qué {e} daría el mejor golpe en una peli de atracos?",
+    "¿Qué {e} sobreviviría más en un apocalipsis zombi?","¿Qué {e} bajaría un río en balsa sin volcar?","¿Qué {e} acabaría antes en urgencias en un viaje de esquí?",
+    "¿Qué {e} pasaría una noche entera en una casa abandonada?","¿Qué {e} se haría antes un tatuaje a juego en un viaje?","¿Qué {e} perdería antes el coche en el parking del aeropuerto?",
+    "¿Qué {e} se apuntaría antes a hacer puenting?"
+  ],
+  habilidades:[
+    "¿Qué {e} saldría antes de un escape room?","¿Qué {e} cocinaría mejor con lo que sobra en la nevera?","¿Qué {e} construiría la torre más alta con espaguetis?",
+    "¿Qué {e} montaría el mejor chiringuito de playa en un fin de semana?","¿Qué {e} ganaría la gymkana de una despedida?","¿Qué {e} levantaría antes una tienda de campaña a oscuras?",
+    "¿Qué {e} ganaría un concurso de cocina de la tele?","¿Qué {e} haría el mejor vídeo viral en un día?","¿Qué {e} arreglaría antes un pinchazo en la carretera?",
+    "¿Qué {e} montaría un negocio rentable con 100 €?"
+  ],
+  absurdas:[
+    "¿Qué {e} ganaría una carrera de relevos con una cuchara y un huevo?","¿Qué {e} conseguiría más firmas para una causa absurda en una hora?","¿Qué {e} cantaría peor en un karaoke y lo daría todo igual?",
+    "¿Qué {e} formaría la mejor orquesta de verbena?","¿Qué {e} ganaría una guerra de agua en una oficina?","¿Qué {e} convencería antes a un pueblo de que son famosos?",
+    "¿Qué {e} sobreviviría más tiempo en un centro comercial cerrado?","¿Qué {e} ganaría un concurso de castillos de arena?","¿Qué {e} sería la peor pareja de detectives?",
+    "¿Qué {e} entrenaría mejor a un equipo de petanca de jubilados?"
+  ]
+};
 export const teamWord=k=>k===2?"pareja":k===3?"trío":"equipo";
 export const BANK_IDX=[];for(const p in BANK)BANK[p].forEach((t,i)=>BANK_IDX.push({id:p+"-"+i,text:t,pack:p}));
+export const DUEL_IDX=[];for(const p in DUELQ)DUELQ[p].forEach((t,i)=>DUEL_IDX.push({id:"d-"+p+"-"+i,text:t,pack:p}));
+export const TEAM_IDX=[];for(const p in TEAMQ)TEAMQ[p].forEach((t,i)=>TEAM_IDX.push({id:"m-"+p+"-"+i,text:t,pack:p}));
