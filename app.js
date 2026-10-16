@@ -16,12 +16,14 @@ const fb = initializeApp(firebaseConfig);
 const auth = getAuth(fb);
 const db = getFirestore(fb);
 
-const DEFAULT_SETTINGS = { freqValue: 1, freqUnit: "días", fixedTime: true, releaseTime: "21:00", perRound: 2, packs: ["amistad", "absurdas", "habilidades"], reveal: "instant", duel: true, duelSize: 2, teams: true, teamSize: 2, weekly: 3, editors: "todos" };
+const DEFAULT_SETTINGS = { freqValue: 1, freqUnit: "días", fixedTime: true, releaseTime: "21:00", perRound: 2, packs: ["amistad", "absurdas", "habilidades"], reveal: "instant", duel: true, duelSize: 2, teams: true, teamSize: 2, weekly: 3, editors: "todos", approval: true };
 
 /* ======== Estado ======== */
 const S = { user: null, profile: null, view: "loading", authMode: "signup", groups: [], gid: null, g: null, tab: "hoy", sub: "chat",
   n: null, next: null, round: null, roundLoaded: false, votes: [], chat: [], queue: [], ranking: null, rankingLoading: false, pendingOpen: null, joinCode: null };
-let unsub = { groups: null, round: null, votes: null, chat: null, queue: null };
+let unsub = { groups: null, profile: null, round: null, votes: null, chat: null, queue: null };
+let unsubReq = {}, unsubMyReq = {};
+const codesFixed = new Set();
 let creating = null, installPrompt = null;
 const off = k => { if (unsub[k]) { unsub[k](); unsub[k] = null; } };
 const ls = { get(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }, set(k, v) { try { localStorage.setItem(k, v); } catch (e) {} } };
@@ -72,7 +74,8 @@ const isIOS = () => /iphone|ipad|ipod/i.test(navigator.userAgent);
 /* ======== Autenticación ======== */
 onAuthStateChanged(auth, async user => {
   Object.keys(unsub).forEach(off);
-  S.user = user; S.groups = []; S.gid = null; S.g = null;
+  S.user = user; S.groups = []; S.gid = null; S.g = null; S.reqs = {}; S.myReqs = {};
+  for (const m of [unsubReq, unsubMyReq]) for (const k in m) { m[k](); delete m[k]; }
   if (!user) { S.profile = null; S.view = "auth"; render(); return; }
   try {
     const p = await getDoc(doc(db, "users", user.uid));
@@ -84,8 +87,10 @@ onAuthStateChanged(auth, async user => {
 });
 function startGroups() {
   S.view = "groups"; render();
+  unsub.profile = onSnapshot(doc(db, "users", uid()), s => { if (s.exists()) { S.profile = s.data(); syncMyReqs(); render(); } }, e => console.error(e));
   unsub.groups = onSnapshot(query(collection(db, "groups"), where("members", "array-contains", uid())), snap => {
     S.groups = snap.docs.map(d => ({ id: d.id, ...d.data() })).sort((a, b) => ms(b.createdAt) - ms(a.createdAt));
+    syncCreatorReqs(); syncMyReqs();
     if (S.pendingOpen && S.groups.find(g => g.id === S.pendingOpen)) { const id = S.pendingOpen; S.pendingOpen = null; openGroup(id); return; }
     if (S.gid) {
       const g = S.groups.find(x => x.id === S.gid);
@@ -101,11 +106,47 @@ function startGroups() {
   }, e => fail(e));
 }
 
+/* ======== Solicitudes para unirse ======== */
+/* El creador escucha las solicitudes pendientes de sus grupos */
+function syncCreatorReqs() {
+  const mine = new Set(S.groups.filter(g => g.creator === uid()).map(g => g.id));
+  for (const gid in unsubReq) if (!mine.has(gid)) { unsubReq[gid](); delete unsubReq[gid]; delete S.reqs[gid]; }
+  mine.forEach(gid => {
+    if (unsubReq[gid]) return;
+    unsubReq[gid] = onSnapshot(query(collection(db, "groups", gid, "requests"), where("status", "==", "pending")), s => {
+      S.reqs[gid] = s.docs.map(d => ({ id: d.id, ...d.data({ serverTimestamps: "estimate" }) })).sort((a, b) => ms(a.at) - ms(b.at)); render();
+    }, e => console.error(e));
+  });
+}
+/* Quien pide entrar sigue el estado de su solicitud */
+function syncMyReqs() {
+  const p = (S.profile && S.profile.pending) || {};
+  for (const gid in unsubMyReq) if (!p[gid]) { unsubMyReq[gid](); delete unsubMyReq[gid]; delete S.myReqs[gid]; }
+  for (const gid in p) {
+    const g = S.groups.find(x => x.id === gid);
+    if (g) { clearPending(gid); if (!clearPending.told) clearPending.told = {}; if (!clearPending.told[gid]) { clearPending.told[gid] = 1; toast("Te han aceptado en «" + g.name + "»"); } continue; }
+    if (unsubMyReq[gid]) continue;
+    unsubMyReq[gid] = onSnapshot(doc(db, "groups", gid, "requests", uid()), s => { S.myReqs[gid] = s.exists() ? s.data().status : "gone"; render(); }, () => { S.myReqs[gid] = "gone"; render(); });
+  }
+}
+const clearing = new Set();
+async function clearPending(gid) { if (clearing.has(gid)) return; clearing.add(gid); try { await updateDoc(doc(db, "users", uid()), { ["pending." + gid]: deleteField() }); } catch (e) { console.error(e); } finally { clearing.delete(gid); } }
+const reqsHTML = gid => {
+  const rq = S.reqs[gid] || []; if (!rq.length) return "";
+  return `<section class="card stack" style="border-color:var(--accent)"><h3 style="font-size:16px">${rq.length === 1 ? "1 persona quiere" : rq.length + " personas quieren"} unirse</h3>
+    ${rq.map(r => `<div class="row" style="flex-wrap:nowrap"><span class="av" style="background:var(--a3)" aria-hidden="true">${esc((r.name || "?")[0].toUpperCase())}</span>
+      <span style="flex:1;min-width:0"><b>${esc(r.name)}</b>${r.adult === false ? ` <span class="chip">menor de 18</span>` : ""}</span>
+      <button class="btn sm" data-approve="${esc(r.id)}" data-gid="${gid}">Aceptar</button><button class="btn alt sm" data-reject="${esc(r.id)}" data-gid="${gid}">Rechazar</button></div>`).join("")}
+  </section>`;
+};
+
 /* ======== Grupo abierto ======== */
 function openGroup(id) {
   closeGroup(true);
   S.gid = id; S.g = S.groups.find(x => x.id === id); S.view = "group"; S.tab = "hoy"; S.ranking = null;
   ls.set("senalados-last", id);
+  /* los códigos de grupos antiguos no guardaban el nombre; se completa una vez */
+  if (S.g && S.g.creator === uid() && !codesFixed.has(S.g.code)) { codesFixed.add(S.g.code); setDoc(doc(db, "codes", S.g.code), { name: S.g.name }, { merge: true }).catch(e => console.error(e)); }
   unsub.chat = onSnapshot(query(col("chat"), orderBy("at", "desc"), limit(80)), s => {
     S.chat = s.docs.map(d => ({ id: d.id, ...d.data({ serverTimestamps: "estimate" }) })).reverse();
     if (S.tab === "grupo" && S.sub === "chat") { const atBottom = innerHeight + scrollY >= document.body.scrollHeight - 80; render(); if (atBottom) toBottom(); }
@@ -251,15 +292,21 @@ function installBanner() {
   return `<div class="card stack" style="gap:8px"><div class="row" style="justify-content:space-between"><b>Ponla en tu pantalla de inicio</b><button class="del" data-act="noinstall">Ocultar</button></div>${txt}</div>`;
 }
 function vGroups() {
-  const list = S.groups.map(g => `<button class="grp" data-open="${g.id}">
+  const list = S.groups.map(g => { const nr = (S.reqs[g.id] || []).length; return `<button class="grp" data-open="${g.id}">
     <div class="faces">${g.members.slice(0, 4).map(m => av(m, "", g)).join("")}</div>
-    <div class="info"><div class="name">${esc(g.name)}</div><div class="muted small">${g.members.length} miembro${g.members.length === 1 ? "" : "s"} · ronda ${schedule(g).n}</div></div>
-    <span class="muted" aria-hidden="true">›</span></button>`).join("");
+    <div class="info"><div class="name">${esc(g.name)}${nr ? ` <span class="crown">${nr} solicitud${nr > 1 ? "es" : ""}</span>` : ""}</div><div class="muted small">${g.members.length} miembro${g.members.length === 1 ? "" : "s"} · ronda ${schedule(g).n}</div></div>
+    <span class="muted" aria-hidden="true">›</span></button>`; }).join("");
+  const pend = Object.entries((S.profile && S.profile.pending) || {}).filter(([gid]) => !S.groups.find(g => g.id === gid)).map(([gid, p]) => {
+    const st = S.myReqs[gid];
+    const txt = st === "rejected" ? "No te han aceptado en este grupo." : st === "gone" ? "La solicitud ya no existe." : "Esperando a que el creador te acepte.";
+    return `<div class="card row" style="flex-wrap:nowrap;opacity:${st === "pending" || !st ? 1 : .8}"><div style="flex:1;min-width:0"><div style="font-weight:700">${esc(p.name || "Grupo")}</div><div class="muted small">${txt}</div></div><button class="del" data-cancelreq="${gid}">${st === "pending" || !st ? "Cancelar" : "Quitar"}</button></div>`;
+  }).join("");
   return `${topbar(`<button class="iconbtn" data-act="logout">Salir</button>`)}
   <div class="stack">
     <div><p class="muted small" style="margin:0">Hola, ${esc(S.profile ? S.profile.username : "")}</p><h1>Tus grupos</h1></div>
     ${installBanner()}
-    ${list || `<div class="card empty">Aún no estás en ningún grupo.<br>Crea uno y pasa el código a tus amigos, o únete con el código de otro.</div>`}
+    ${pend}
+    ${list || pend ? list : `<div class="card empty">Aún no estás en ningún grupo.<br>Crea uno y pasa el código a tus amigos, o únete con el código de otro.</div>`}
     <div class="row" style="flex-wrap:nowrap"><button class="btn block" data-act="create">Crear grupo</button><button class="btn alt block" data-act="join">Unirme con código</button></div>
   </div>`;
 }
@@ -272,8 +319,9 @@ function vGroup(g) {
   </div>
   ${S.tab === "grupo" ? "" : `<div class="timer" style="margin-bottom:14px"><div><div class="small" style="opacity:.75">Nueva ronda ${fixed ? "a las " + st.releaseTime + " · en" : "en"}</div><b id="countdown">—</b></div><div class="sp"></div>${canEdit(g) ? `<button data-act="force">Pasar a la siguiente</button>` : ""}</div>`}`;
   const T = { hoy: tHoy, duelos: tDuelos, equipos: tEquipos, grupo: tGrupo, añadir: tAdd, ajustes: tSet }[S.tab] || tHoy;
-  if (["hoy", "duelos", "equipos"].includes(S.tab) && !S.round) return head + `<div class="card empty">${S.roundLoaded ? "Preparando la ronda…" : "Cargando la ronda…"}</div>`;
-  return head + T(g);
+  const reqBox = g.creator === uid() && S.tab !== "grupo" ? reqsHTML(S.gid) : "";
+  if (["hoy", "duelos", "equipos"].includes(S.tab) && !S.round) return head + reqBox + `<div class="card empty">${S.roundLoaded ? "Preparando la ronda…" : "Cargando la ronda…"}</div>`;
+  return head + (reqBox ? `<div style="margin-bottom:12px">${reqBox}</div>` : "") + T(g);
 }
 const chips = (v, match) => Object.entries(v).filter(([, x]) => x === match).map(([w]) => `<span class="chip ${w === uid() ? "me" : ""}">${esc(name(w))}</span>`).join("");
 const completeNote = s => `<div class="more"><span class="muted small">${s.n} de ${s.total} han votado · votos visibles</span></div>`;
@@ -286,7 +334,7 @@ function resultsHTML(v, options) {
     <div class="n">${pct(c.n, total)}%<small>${votosTxt(c.n)}</small></div></div>`).join("")}</div>`;
 }
 function tHoy(g) {
-  const r = S.round, opts = r.members;
+  const r = S.round, opts = r.members.filter(m => g.members.includes(m));
   if (!r.questions.length) return `<div class="card empty">Esta ronda no tiene preguntas. Revisa los paquetes en Ajustes.</div>`;
   return `<div class="stack"><div class="row"><h2 style="flex:1">Ronda ${r.n}</h2><span class="muted small">${r.questions.length} pregunta${r.questions.length > 1 ? "s" : ""}</span></div>
   ${r.questions.map(q => {
@@ -441,8 +489,13 @@ function tSet(g) {
     ${creator ? `${seg("editors", [["todos", "Todo el grupo"], ["creador", "Solo yo"]], "Permisos", false)}<span class="muted small">${st.editors === "todos" ? "Cualquier miembro puede cambiar los ajustes del juego." : "Solo tú puedes cambiar los ajustes del juego. El resto los verá bloqueados."}</span>`
       : `${seg("editors", [["todos", "Todo el grupo"], ["creador", "Solo " + esc(rawName(g.creator))]], "Permisos", true)}<span class="muted small">Esto solo lo puede cambiar quien creó el grupo (${esc(rawName(g.creator))}).</span>`}
   </section>
+  <section class="card set"><h3>Para entrar al grupo</h3>
+    ${creator ? `<div class="seg" role="group" aria-label="Entrada"><button type="button" data-set="approval" data-val="true" aria-pressed="${st.approval !== false}">Con mi aprobación</button><button type="button" data-set="approval" data-val="false" aria-pressed="${st.approval === false}">Libre con el código</button></div>
+      <span class="muted small">${st.approval !== false ? "Quien use el código te enviará una solicitud y tendrás que aceptarla." : "Cualquiera con el código entra directamente."}</span>`
+      : `<span class="muted">${st.approval !== false ? "Hace falta que " + esc(rawName(g.creator)) + " acepte a quien quiera entrar." : "Cualquiera con el código entra directamente."}</span>`}
+  </section>
   <section class="card set"><h3>Miembros (${g.members.length})</h3>
-    ${g.members.map(m => `<div class="row">${av(m)}<span style="flex:1">${esc(rawName(m))}${m === g.creator ? ` <span class="chip">creador</span>` : ""}</span></div>`).join("")}
+    ${g.members.map(m => `<div class="row" style="flex-wrap:nowrap">${av(m)}<span style="flex:1;min-width:0">${esc(rawName(m))}${m === g.creator ? ` <span class="chip">creador</span>` : ""}${m === uid() ? ` <span class="chip me">tú</span>` : ""}</span>${creator && m !== uid() ? `<button class="del" data-kick="${esc(m)}" style="color:var(--p-picante)">Echar</button>` : ""}</div>`).join("")}
   </section>
   ${creator ? "" : `<button class="btn alt" data-act="leave">Salir del grupo</button>`}
   <button class="del" data-act="logout" style="align-self:center">Cerrar sesión</button>
@@ -498,7 +551,7 @@ document.addEventListener("submit", async e => {
       const ref = doc(collection(db, "groups")), b = writeBatch(db);
       b.set(ref, { name: n, code, creator: uid(), members: [uid()], memberInfo: { [uid()]: { name: S.profile.username, adult: S.profile.adult, photo: null } },
         settings: { ...DEFAULT_SETTINGS, packs: DEFAULT_SETTINGS.packs.slice() }, roundBase: 1, anchor: Date.now(), used: [], createdAt: serverTimestamp() });
-      b.set(doc(db, "codes", code), { gid: ref.id, creator: uid() });
+      b.set(doc(db, "codes", code), { gid: ref.id, creator: uid(), name: n });
       await b.commit();
       closeModal(); S.pendingOpen = ref.id; toast("Grupo creado. Pulsa «Invitar» para mandar el código");
     } catch (x) { fail(x); setBusy(f, false); }
@@ -510,10 +563,18 @@ document.addEventListener("submit", async e => {
     try {
       const cs = await getDoc(doc(db, "codes", c));
       if (!cs.exists()) { err.textContent = "No hay ningún grupo con ese código. Revísalo."; setBusy(f, false); return; }
-      const gid = cs.data().gid;
+      const gid = cs.data().gid, gname = cs.data().name || "el grupo";
       if (S.groups.find(g => g.id === gid)) { closeModal(); openGroup(gid); return; }
-      await updateDoc(doc(db, "groups", gid), { members: arrayUnion(uid()), [`memberInfo.${uid()}`]: { name: S.profile.username, adult: S.profile.adult, photo: null } });
-      closeModal(); S.pendingOpen = gid; toast("¡Dentro!");
+      try {
+        await updateDoc(doc(db, "groups", gid), { members: arrayUnion(uid()), [`memberInfo.${uid()}`]: { name: S.profile.username, adult: S.profile.adult, photo: null } });
+        closeModal(); S.pendingOpen = gid; toast("¡Dentro!");
+      } catch (x) {
+        /* el grupo pide aprobación: se envía una solicitud al creador */
+        if (!String(x && x.code).includes("permission-denied")) throw x;
+        await setDoc(doc(db, "groups", gid, "requests", uid()), { uid: uid(), name: S.profile.username, adult: S.profile.adult, status: "pending", at: serverTimestamp() });
+        await updateDoc(doc(db, "users", uid()), { ["pending." + gid]: { name: gname, code: c, at: Date.now() } });
+        closeModal(); toast("Solicitud enviada. Entrarás cuando te acepten");
+      }
     } catch (x) { err.textContent = errText(x); setBusy(f, false); }
   }
   if (id === "f-add") {
@@ -556,13 +617,24 @@ document.addEventListener("click", async e => {
   else if (d.sub) { S.sub = d.sub; if (d.sub === "ranking") S.ranking = null; render(); if (d.sub === "chat") toBottom(); }
   else if (d.vote) castVote(d.vote, d.id, d.vote === "m" ? Number(d.to) : d.to);
   else if (d.step) { const st = g.settings, lim = { perRound: [1, 5], freqValue: [1, 30], weekly: [1, 20] }[d.step]; const v = Math.min(lim[1], Math.max(lim[0], st[d.step] + Number(d.d))); if (v !== st[d.step]) updateSettings({ [d.step]: v }, d.step === "freqValue"); }
-  else if (d.set) { const v = (d.set === "duelSize" || d.set === "teamSize") ? Number(d.val) : d.val; updateSettings({ [d.set]: v }, d.set === "freqUnit"); if (d.set === "editors") toast(v === "todos" ? "Todo el grupo puede cambiar los ajustes" : "Solo tú puedes cambiar los ajustes"); }
+  else if (d.set) { const v = (d.set === "duelSize" || d.set === "teamSize") ? Number(d.val) : d.set === "approval" ? d.val === "true" : d.val; updateSettings({ [d.set]: v }, d.set === "freqUnit"); if (d.set === "editors") toast(v === "todos" ? "Todo el grupo puede cambiar los ajustes" : "Solo tú puedes cambiar los ajustes"); }
   else if (d.pack) { const p = g.settings.packs.slice(), i = p.indexOf(d.pack); if (i >= 0) { if (p.length === 1) { toast("Deja al menos un paquete activo"); return; } p.splice(i, 1); } else p.push(d.pack); updateSettings({ packs: p }); }
+  else if (d.approve) {
+    const r = (S.reqs[d.gid] || []).find(x => x.id === d.approve); if (!r) return;
+    try { const bt = writeBatch(db);
+      bt.update(doc(db, "groups", d.gid), { members: arrayUnion(r.id), [`memberInfo.${r.id}`]: { name: r.name, adult: r.adult !== false, photo: null }, lastApproved: r.id });
+      bt.delete(doc(db, "groups", d.gid, "requests", r.id)); await bt.commit(); toast(r.name + " ya está en el grupo");
+    } catch (x) { fail(x); } }
+  else if (d.reject) { try { await updateDoc(doc(db, "groups", d.gid, "requests", d.reject), { status: "rejected" }); toast("Solicitud rechazada"); } catch (x) { fail(x); } }
+  else if (d.cancelreq) { try { await deleteDoc(doc(db, "groups", d.cancelreq, "requests", uid())).catch(() => {}); await clearPending(d.cancelreq); } catch (x) { fail(x); } }
+  else if (d.kick) {
+    if (!b.dataset.sure) { b.dataset.sure = "1"; b.textContent = "¿Echar a " + rawName(d.kick) + "? Toca otra vez"; setTimeout(() => { if (b.isConnected) { delete b.dataset.sure; b.textContent = "Echar"; } }, 4000); return; }
+    try { const nm = rawName(d.kick); await updateDoc(gref(), { members: arrayRemove(d.kick) }); toast(nm + " ya no está en el grupo"); } catch (x) { fail(x); } }
   else if (d.delq) { try { await deleteDoc(doc(col("queue"), d.delq)); toast("Pregunta quitada. Recuperas ese hueco esta semana"); } catch (x) { fail(x); } }
   else if (d.act === "force") { if (!b.dataset.sure) { b.dataset.sure = "1"; b.textContent = "¿Seguro? Toca otra vez"; setTimeout(() => { if (b.isConnected) { delete b.dataset.sure; b.textContent = "Pasar a la siguiente"; } }, 4000); return; }
     try { await updateDoc(gref(), { roundBase: S.n + 1, anchor: Date.now() }); toast("Nueva ronda en marcha"); } catch (x) { fail(x); } }
   else if (d.act === "invite") {
-    const url = location.origin + location.pathname + "?c=" + g.code, text = `Únete a «${g.name}» en Señalados. Código: ${g.code}`;
+    const url = location.origin + location.pathname + "?c=" + g.code, text = `Únete a «${g.name}» en Señalados. Código: ${g.code}` + (g.settings.approval !== false ? ` (${rawName(g.creator)} tendrá que aceptarte)` : "");
     if (navigator.share) { try { await navigator.share({ title: "Señalados", text, url }); } catch (x) {} }
     else { try { await navigator.clipboard.writeText(text + "\n" + url); toast("Invitación copiada. Pégala en WhatsApp"); } catch (x) { toast("Código del grupo: " + g.code); } }
   }

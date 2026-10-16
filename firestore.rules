@@ -20,14 +20,19 @@ service cloud.firestore {
       allow get: if signedIn();
       allow list: if false;
       allow create: if signedIn() && request.resource.data.creator == me();
+      // el creador puede guardar el nombre del grupo en su código
+      allow update: if signedIn() && resource.data.creator == me()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name']);
     }
 
     match /groups/{gid} {
       function changed() { return request.resource.data.diff(resource.data).affectedKeys(); }
       function infoChanged() { return request.resource.data.memberInfo.diff(resource.data.memberInfo).affectedKeys(); }
-      // Entrar con código: solo puedes añadirte a ti
+      function approvalOn(data) { return data.settings.get('approval', true) != false; }
+      // Entrar directamente con el código: solo si el grupo no pide aprobación
       function isJoin() {
-        return !(me() in resource.data.members)
+        return !approvalOn(resource.data)
+          && !(me() in resource.data.members)
           && changed().hasOnly(['members', 'memberInfo'])
           && request.resource.data.members.toSet() == resource.data.members.toSet().union([me()].toSet())
           && infoChanged().hasOnly([me()]);
@@ -42,7 +47,28 @@ service cloud.firestore {
           && (!changed().hasAny(['settings', 'roundBase', 'anchor'])
               || resource.data.settings.editors == 'todos' || me() == resource.data.creator)
           && (request.resource.data.settings.editors == resource.data.settings.editors
+              || me() == resource.data.creator)
+          && (approvalOn(request.resource.data) == approvalOn(resource.data)
               || me() == resource.data.creator);
+      }
+      // El creador acepta una solicitud: añade exactamente a esa persona
+      function isApprove() {
+        let who = request.resource.data.lastApproved;
+        return me() == resource.data.creator
+          && changed().hasOnly(['members', 'memberInfo', 'lastApproved'])
+          && request.resource.data.members.toSet() == resource.data.members.toSet().union([who].toSet())
+          && !(who in resource.data.members)
+          && infoChanged().hasOnly([who])
+          && exists(/databases/$(database)/documents/groups/$(gid)/requests/$(who));
+      }
+      // El creador echa a alguien (nunca a sí mismo)
+      function isKick() {
+        let removed = resource.data.members.toSet().difference(request.resource.data.members.toSet());
+        return me() == resource.data.creator
+          && changed().hasOnly(['members'])
+          && removed.size() == 1
+          && !(resource.data.creator in removed)
+          && request.resource.data.members.toSet().difference(resource.data.members.toSet()).size() == 0;
       }
 
       allow read: if signedIn() && me() in resource.data.members;
@@ -50,7 +76,24 @@ service cloud.firestore {
         && request.resource.data.creator == me()
         && request.resource.data.members == [me()]
         && request.resource.data.memberInfo.keys().hasOnly([me()]);
-      allow update: if signedIn() && (isJoin() || isMemberUpdate());
+      allow update: if signedIn() && (isJoin() || isMemberUpdate() || isApprove() || isKick());
+
+      // Solicitudes para entrar: las crea quien quiere entrar y las gestiona el creador
+      match /requests/{rid} {
+        function grp() { return get(/databases/$(database)/documents/groups/$(gid)).data; }
+        allow get: if signedIn() && (rid == me() || me() == grp().creator);
+        allow list: if signedIn() && me() == grp().creator;
+        allow create, update: if signedIn() && rid == me()
+          && !(me() in grp().members)
+          && request.resource.data.uid == me()
+          && request.resource.data.status == 'pending'
+          && request.resource.data.name is string
+          && request.resource.data.name.size() <= 20;
+        allow update: if signedIn() && me() == grp().creator
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status'])
+          && request.resource.data.status == 'rejected';
+        allow delete: if signedIn() && (rid == me() || me() == grp().creator);
+      }
 
       match /rounds/{n} {
         allow read, create: if isMember(gid);
